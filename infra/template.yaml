@@ -1,0 +1,137 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AI Roast Device — Lambda orchestrator for ESP32 face roasts
+
+Parameters:
+  RoastApiKey:
+    Type: String
+    NoEcho: true
+    Description: API key for authenticating roast requests
+
+Globals:
+  Function:
+    Tracing: Active
+
+Resources:
+  # ── S3 Bucket (image scratch) ──────────────────────────────────
+  RoastImagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub roast-images-${AWS::AccountId}-${AWS::Region}
+      LifecycleConfiguration:
+        - Rule:
+            Status: Enabled
+            ExpirationInDays: 1
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: ai-roast
+
+  # ── IAM Role (Lambda execution) ────────────────────────────────
+  RoastLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RoastLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CloudWatch logs
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              # Rekognition
+              - Effect: Allow
+                Action: rekognition:DetectFaces
+                Resource: '*'
+              # Bedrock
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - arn:aws:bedrock:*::*:foundation-model/anthropic.claude-*
+              # Guardrails
+              - Effect: Allow
+                Action:
+                  - bedrock:GetGuardrail
+                  - bedrock:ApplyGuardrail
+                Resource: !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail/*
+              # Polly
+              - Effect: Allow
+                Action: polly:SynthesizeSpeech
+                Resource: '*'
+              # S3
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: !Sub arn:aws:s3:::${RoastImagesBucket}/*
+      Tags:
+        - Key: Project
+          Value: ai-roast
+
+  # ── Lambda Function ────────────────────────────────────────────
+  RoastFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ai-roast
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      CodeUri: ../backend/
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          AWS_REGION: !Ref AWS::Region
+          BEDROCK_MODEL_ID: anthropic.claude-haiku-4-20250312-v1:0
+          POLLY_VOICE: Matthew
+          ROAST_API_KEY: !Ref RoastApiKey
+          IMAGE_BUCKET: !Ref RoastImagesBucket
+      Role: !GetAtt RoastLambdaRole.Arn
+      Tags:
+        Project: ai-roast
+
+  # ── Lambda Function URL (response streaming) ───────────────────
+  RoastFunctionUrl:
+    Type: AWS::Lambda::FunctionUrl
+    Properties:
+      FunctionName: !GetAtt RoastFunction.FunctionName
+      AuthorizationType: NONE  # API key handled in-function
+      Cors:
+        AllowOrigins: ['*']
+        AllowMethods: ['POST']
+        MaxAge: 86400
+
+  # ── CloudWatch Log Group with retention ────────────────────────
+  RoastLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/ai-roast
+      RetentionInDays: 30
+
+Outputs:
+  RoastFunctionUrl:
+    Description: Lambda Function URL for the roast endpoint
+    Value: !GetAtt RoastFunction.Url
+  RoastFunctionArn:
+    Description: Lambda Function ARN
+    Value: !GetAtt RoastFunction.Arn
+  RoastImagesBucket:
+    Description: S3 bucket for image scratch
+    Value: !Ref RoastImagesBucket
